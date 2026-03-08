@@ -25,6 +25,7 @@ from ..constants import (
     log_level_attributes,
 )
 from ..db_statement_summary import message_from_db_statement
+from ..integrations.llm_providers.semconv import PROVIDER_NAME
 from ..json_schema import JsonSchemaProperties, attributes_json_schema
 from ..scrubbing import BaseScrubber
 from ..utils import (
@@ -289,7 +290,7 @@ def _tweak_http_spans(span: ReadableSpanDict):
 
 def _summarize_db_statement(span: ReadableSpanDict):
     attributes = span['attributes']
-    message: str | None = attributes.get(ATTRIBUTES_MESSAGE_KEY)  # type: ignore
+    message: str | None = attributes.get(ATTRIBUTES_MESSAGE_KEY)  # pyright: ignore[reportAssignmentType]
     summary = message_from_db_statement(attributes, message, span['name'])
     if summary is not None:
         span['attributes'] = {**attributes, ATTRIBUTES_MESSAGE_KEY: summary}
@@ -397,12 +398,12 @@ def _transform_langsmith_span_attributes(
         # This applies to older langsmith versions
         attributes = {k: v for k, v in attributes.items() if not k.startswith('gen_ai.usage.')}
 
-    guessed_system = guess_system(request_model)
-    actual_system = attributes.get('gen_ai.system')
-    if guessed_system:
-        if actual_system in (None, 'langchain'):  # pragma: no cover
-            new_attributes['gen_ai.system'] = guessed_system
-    elif actual_system == 'langchain':
+    system = attributes.get('gen_ai.system')
+    if system in (None, 'langchain'):
+        system = attributes.get('langsmith.metadata.ls_provider') or guess_system(request_model)
+    if system:
+        new_attributes['gen_ai.system'] = new_attributes[PROVIDER_NAME] = system
+    else:
         # Remove gen_ai.system=langchain as this also interferes with costs in the UI.
         attributes = {k: v for k, v in attributes.items() if k != 'gen_ai.system'}
 
@@ -448,8 +449,15 @@ def _transform_langsmith_span_attributes(
                         message_events = output_message_events
                     else:
                         message_events += output_message_events
-                except Exception:  # pragma: no cover
-                    message_events += [_transform_langchain_message(output_value['output'])]
+                except Exception:
+                    try:
+                        message_events += [
+                            _transform_langchain_message(m)
+                            for o in output_value['output']
+                            for m in o['update']['messages']
+                        ]
+                    except Exception:  # pragma: no cover
+                        message_events += [_transform_langchain_message(output_value['output'])]
 
         new_attributes['all_messages_events'] = json.dumps(message_events)
 
@@ -474,7 +482,7 @@ def _transform_langchain_message(old_message: dict[str, Any]) -> dict[str, Any]:
     }
 
     content: list[Any] = result.get('content', [])
-    if isinstance(content, list) and content:  # type: ignore
+    if isinstance(content, list) and content:  # pyright: ignore[reportUnnecessaryIsInstance]
         new_content: list[Any] = []
         for item in content:
             item = cast(dict[str, Any], item)
